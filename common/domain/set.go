@@ -93,7 +93,7 @@ func readSuccinctSet(reader varbin.Reader) (*succinctSet, error) {
 }
 
 func (ss *succinctSet) Write(writer varbin.Writer) error {
-	return varbin.Write(writer, binary.BigEndian, succinctSetData{
+	return varbin.Write(writer, binary.BigEndian, &succinctSetData{
 		Leaves:      ss.leaves,
 		LabelBitmap: ss.labelBitmap,
 		Labels:      ss.labels,
