@@ -113,9 +113,7 @@ func (s *Service) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destinati
 		Buffer:      buffer,
 		Destination: destination,
 	}
-	select {
-	case conn.packetChan <- packet:
-	default:
+	if !conn.enqueue(packet) {
 		packet.Buffer.Release()
 		N.PutPacketBuffer(packet)
 	}

@@ -35,7 +35,9 @@ type natConn struct {
 	localAddr       M.Socksaddr
 	handlerAccess   sync.RWMutex
 	handler         N.UDPHandlerEx
+	packetAccess    sync.Mutex
 	packetChan      chan *N.PacketBuffer
+	closed          bool
 	closeOnce       sync.Once
 	doneChan        chan struct{}
 	readDeadline    pipe.Deadline
@@ -125,6 +127,8 @@ func (c *natConn) SetHandler(handler N.UDPHandlerEx) {
 	c.handler = handler
 	c.readWaitOptions = N.NewReadWaitOptions(nil, handler)
 	c.handlerAccess.Unlock()
+	c.packetAccess.Lock()
+	defer c.packetAccess.Unlock()
 fetch:
 	for {
 		select {
@@ -135,6 +139,20 @@ fetch:
 		default:
 			break fetch
 		}
+	}
+}
+
+func (c *natConn) enqueue(packet *N.PacketBuffer) bool {
+	c.packetAccess.Lock()
+	defer c.packetAccess.Unlock()
+	if c.closed {
+		return false
+	}
+	select {
+	case c.packetChan <- packet:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -152,8 +170,20 @@ func (c *natConn) SetTimeout(timeout time.Duration) bool {
 
 func (c *natConn) Close() error {
 	c.closeOnce.Do(func() {
+		c.packetAccess.Lock()
+		c.closed = true
 		close(c.doneChan)
-		common.Close(c.handler)
+		for {
+			select {
+			case packet := <-c.packetChan:
+				packet.Buffer.Release()
+				N.PutPacketBuffer(packet)
+			default:
+				c.packetAccess.Unlock()
+				common.Close(c.handler)
+				return
+			}
+		}
 	})
 	return nil
 }
