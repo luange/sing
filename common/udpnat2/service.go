@@ -15,18 +15,42 @@ import (
 )
 
 type Service struct {
-	cache   *freelru.Cache[netip.AddrPort, *natConn]
-	handler N.UDPConnectionHandlerEx
-	prepare PrepareFunc
+	cache      *freelru.Cache[netip.AddrPort, *natConn]
+	handler    N.UDPConnectionHandlerEx
+	prepare    PrepareFunc
+	queueDepth int
 }
 
 type PrepareFunc func(source M.Socksaddr, destination M.Socksaddr, userData any) (bool, context.Context, N.PacketWriter, N.CloseHandlerFunc)
 
 func New(handler N.UDPConnectionHandlerEx, prepare PrepareFunc, timeout time.Duration, shared bool) *Service {
+	return NewWithOptions(handler, prepare, Options{
+		Timeout:    timeout,
+		Shared:     shared,
+		Capacity:   1024,
+		QueueDepth: 64,
+	})
+}
+
+type Options struct {
+	Timeout    time.Duration
+	Shared     bool
+	Capacity   uint32
+	QueueDepth int
+}
+
+func NewWithOptions(handler N.UDPConnectionHandlerEx, prepare PrepareFunc, options Options) *Service {
+	timeout := options.Timeout
 	if timeout == 0 {
 		panic("invalid timeout")
 	}
-	cache := common.Must1(freelru.New[netip.AddrPort, *natConn](1024, maphash.NewHasher[netip.AddrPort]().Hash32, shared))
+	if options.Capacity <= 0 {
+		panic("invalid capacity")
+	}
+	if options.QueueDepth <= 0 {
+		panic("invalid queue depth")
+	}
+	cache := common.Must1(freelru.New[netip.AddrPort, *natConn](options.Capacity, maphash.NewHasher[netip.AddrPort]().Hash32, options.Shared))
 	cache.SetLifetime(timeout)
 	cache.SetHealthCheck(func(port netip.AddrPort, conn *natConn) bool {
 		select {
@@ -40,9 +64,10 @@ func New(handler N.UDPConnectionHandlerEx, prepare PrepareFunc, timeout time.Dur
 		conn.Close()
 	})
 	return &Service{
-		cache:   cache,
-		handler: handler,
-		prepare: prepare,
+		cache:      cache,
+		handler:    handler,
+		prepare:    prepare,
+		queueDepth: options.QueueDepth,
 	}
 }
 
@@ -56,7 +81,7 @@ func (s *Service) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destinati
 			cache:        s.cache,
 			writer:       writer,
 			localAddr:    source,
-			packetChan:   make(chan *N.PacketBuffer, 64),
+			packetChan:   make(chan *N.PacketBuffer, s.queueDepth),
 			doneChan:     make(chan struct{}),
 			readDeadline: pipe.MakeDeadline(),
 		}
@@ -94,6 +119,10 @@ func (s *Service) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destinati
 		packet.Buffer.Release()
 		N.PutPacketBuffer(packet)
 	}
+}
+
+func (s *Service) Len() int {
+	return s.cache.Len()
 }
 
 func (s *Service) NewPacketBatch(buffers []*buf.Buffer, sources []M.Socksaddr, destination M.Socksaddr, userData any) {
