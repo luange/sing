@@ -3,9 +3,9 @@ package udpnat
 import (
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing/common"
@@ -14,7 +14,6 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/pipe"
-	"github.com/sagernet/sing/contrab/freelru"
 )
 
 type Conn interface {
@@ -30,13 +29,16 @@ var (
 )
 
 type natConn struct {
-	cache           *freelru.Cache[netip.AddrPort, *natConn]
+	cache           *flowTable
 	writer          N.PacketWriter
 	localAddr       M.Socksaddr
 	handlerAccess   sync.RWMutex
 	handler         N.UDPHandlerEx
+	packetAccess    sync.Mutex
 	packetChan      chan *N.PacketBuffer
+	closed          bool
 	closeOnce       sync.Once
+	registered      atomic.Bool
 	doneChan        chan struct{}
 	readDeadline    pipe.Deadline
 	readWaitOptions N.ReadWaitOptions
@@ -125,6 +127,8 @@ func (c *natConn) SetHandler(handler N.UDPHandlerEx) {
 	c.handler = handler
 	c.readWaitOptions = N.NewReadWaitOptions(nil, handler)
 	c.handlerAccess.Unlock()
+	c.packetAccess.Lock()
+	defer c.packetAccess.Unlock()
 fetch:
 	for {
 		select {
@@ -135,6 +139,20 @@ fetch:
 		default:
 			break fetch
 		}
+	}
+}
+
+func (c *natConn) enqueue(packet *N.PacketBuffer) bool {
+	c.packetAccess.Lock()
+	defer c.packetAccess.Unlock()
+	if c.closed {
+		return false
+	}
+	select {
+	case c.packetChan <- packet:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -152,8 +170,26 @@ func (c *natConn) SetTimeout(timeout time.Duration) bool {
 
 func (c *natConn) Close() error {
 	c.closeOnce.Do(func() {
+		c.packetAccess.Lock()
+		c.closed = true
 		close(c.doneChan)
-		common.Close(c.handler)
+		for {
+			select {
+			case packet := <-c.packetChan:
+				packet.Buffer.Release()
+				N.PutPacketBuffer(packet)
+			default:
+				c.packetAccess.Unlock()
+				common.Close(c.handler)
+				// Remove promptly when the transport ends instead of waiting for
+				// the janitor tick. Remove is idempotent, so the table's cleanup
+				// callback can safely call Close again for expiry-driven cleanup.
+				if c.cache != nil && c.registered.Load() {
+					c.cache.Remove(c.localAddr.AddrPort(), c)
+				}
+				return
+			}
+		}
 	})
 	return nil
 }

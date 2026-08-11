@@ -67,6 +67,30 @@ func TestNatConnPacketBatchWriterCreator(t *testing.T) {
 	}
 }
 
+func TestNatConnCloseDrainsAndRejectsPackets(t *testing.T) {
+	conn := &natConn{
+		writer:       testPacketWriter{},
+		packetChan:   make(chan *N.PacketBuffer, 4),
+		doneChan:     make(chan struct{}),
+		readDeadline: pipe.MakeDeadline(),
+	}
+	if !conn.enqueue(testPacketBuffer("a", M.ParseSocksaddr("1.1.1.1:53"))) {
+		t.Fatal("open connection rejected packet")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.packetChan) != 0 {
+		t.Fatalf("close left %d queued packets", len(conn.packetChan))
+	}
+	packet := testPacketBuffer("b", M.ParseSocksaddr("1.0.0.1:53"))
+	if conn.enqueue(packet) {
+		t.Fatal("closed connection accepted packet")
+	}
+	packet.Buffer.Release()
+	N.PutPacketBuffer(packet)
+}
+
 func testPacketBuffer(data string, destination M.Socksaddr) *N.PacketBuffer {
 	packet := N.NewPacketBuffer()
 	packet.Buffer = buf.As([]byte(data)).ToOwned()
