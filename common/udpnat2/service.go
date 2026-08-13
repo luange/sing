@@ -14,12 +14,13 @@ import (
 )
 
 type Service struct {
-	cache              *flowTable
-	handler            N.UDPConnectionHandlerEx
-	prepare            PrepareFunc
-	queueDepth         int
-	newSessionRejected atomic.Uint64
-	queueDrops         atomic.Uint64
+	cache                *flowTable
+	handler              N.UDPConnectionHandlerEx
+	prepare              PrepareFunc
+	queueDepth           int
+	onNewSessionRejected func(source, destination M.Socksaddr)
+	newSessionRejected   atomic.Uint64
+	queueDrops           atomic.Uint64
 }
 
 // flowTable intentionally does not evict the least-recently-used active
@@ -256,10 +257,11 @@ func New(handler N.UDPConnectionHandlerEx, prepare PrepareFunc, timeout time.Dur
 }
 
 type Options struct {
-	Timeout    time.Duration
-	Shared     bool
-	Capacity   uint32
-	QueueDepth int
+	Timeout              time.Duration
+	Shared               bool
+	Capacity             uint32
+	QueueDepth           int
+	OnNewSessionRejected func(source, destination M.Socksaddr)
 }
 
 func NewWithOptions(handler N.UDPConnectionHandlerEx, prepare PrepareFunc, options Options) *Service {
@@ -286,10 +288,11 @@ func NewWithOptions(handler N.UDPConnectionHandlerEx, prepare PrepareFunc, optio
 		conn.Close()
 	})
 	return &Service{
-		cache:      cache,
-		handler:    handler,
-		prepare:    prepare,
-		queueDepth: options.QueueDepth,
+		cache:                cache,
+		handler:              handler,
+		prepare:              prepare,
+		queueDepth:           options.QueueDepth,
+		onNewSessionRejected: options.OnNewSessionRejected,
 	}
 }
 
@@ -313,6 +316,9 @@ func (s *Service) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destinati
 	if !ok {
 		if rejected {
 			s.newSessionRejected.Add(1)
+			if s.onNewSessionRejected != nil {
+				s.onNewSessionRejected(source, destination)
+			}
 		}
 		return
 	}

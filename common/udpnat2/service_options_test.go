@@ -61,6 +61,32 @@ func TestCapacityNeverEvictsActiveSession(t *testing.T) {
 	}
 }
 
+func TestCapacityRejectionInvokesAdmissionCallback(t *testing.T) {
+	var rejectedSource, rejectedDestination M.Socksaddr
+	service := NewWithOptions(nil, nil, Options{
+		Timeout:    time.Minute,
+		Capacity:   1,
+		QueueDepth: 1,
+		OnNewSessionRejected: func(source, destination M.Socksaddr) {
+			rejectedSource = source
+			rejectedDestination = destination
+		},
+	})
+	seed := netip.MustParseAddrPort("192.0.2.1:1000")
+	if !service.cache.Add(seed, &natConn{doneChan: make(chan struct{})}) {
+		t.Fatal("failed to seed full table")
+	}
+	source := M.SocksaddrFromNetIP(netip.MustParseAddrPort("192.0.2.1:1001"))
+	destination := M.SocksaddrFromNetIP(netip.MustParseAddrPort("198.51.100.1:443"))
+	service.NewPacket([][]byte{{1}}, source, destination, nil)
+	if rejectedSource != source || rejectedDestination != destination {
+		t.Fatalf("unexpected rejection callback: source=%v destination=%v", rejectedSource, rejectedDestination)
+	}
+	if stats := service.RuntimeStats(); stats.NewSessionRejected != 1 {
+		t.Fatalf("rejected sessions = %d, want 1", stats.NewSessionRejected)
+	}
+}
+
 func TestConnectionCloseRemovesEntryImmediately(t *testing.T) {
 	service := NewWithOptions(nil, nil, Options{Timeout: time.Minute, Capacity: 2, QueueDepth: 1})
 	key := netip.MustParseAddrPort("192.0.2.2:1000")
